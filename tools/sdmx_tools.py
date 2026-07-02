@@ -406,6 +406,20 @@ def register_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
+    def get_cache_status(ctx: Context) -> dict[str, Any]:
+        """
+        Snapshot of the local metadata cache: row counts and freshness.
+
+        No network call. Returns {"enabled": false} if the sibling
+        stathub-cache folder isn't present on this machine (caching is
+        then silently disabled and every tool falls back to live calls).
+        """
+        cache = _app_ctx(ctx).cache
+        if cache is None:
+            return {"enabled": False}
+        return {"enabled": True, **cache.get_status()}
+
+    @mcp.tool()
     async def get_codelist(
         ctx: Context, codelist_id: str, agency: str | None = None, version: str = "latest"
     ) -> CodelistResult:
