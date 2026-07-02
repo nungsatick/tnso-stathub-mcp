@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mes:Structure xmlns:mes="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/message"
+                xmlns:str="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/structure"
+                xmlns:com="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/common">
+  <mes:Structures>
+    <str:Codelists>
+      <str:Codelist id="CL_GEO" agencyID="TNSO" version="1.0" isFinal="true">
+        <com:Name xml:lang="en">Geography</com:Name>
+        <str:Code id="TH">
+          <com:Name xml:lang="en">Thailand</com:Name>
+        </str:Code>
+        <str:Code id="BKK">
+          <com:Name xml:lang="en">Bangkok</com:Name>
+        </str:Code>
+        <str:Code id="CNX">
+          <com:Name xml:lang="en">Chiang Mai</com:Name>
+        </str:Code>
+      </str:Codelist>
+    </str:Codelists>
+  </mes:Structures>
+</mes:Structure>

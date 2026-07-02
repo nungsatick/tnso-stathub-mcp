@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mes:Structure xmlns:mes="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/message"
+                xmlns:str="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/structure"
+                xmlns:com="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/common">
+  <mes:Structures>
+    <str:Dataflows>
+      <str:Dataflow id="DF_03GARD_PUB" agencyID="TNSO" version="1.1" isFinal="true">
+        <com:Name xml:lang="en">Public Garden Statistics</com:Name>
+        <str:Structure>
+          <Ref agencyID="TNSO" id="DSD_03GARD_PUB" version="1.1" package="datastructure" class="DataStructure"/>
+        </str:Structure>
+      </str:Dataflow>
+    </str:Dataflows>
+    <str:DataStructures>
+      <str:DataStructure id="DSD_03GARD_PUB" agencyID="TNSO" version="1.1" isFinal="true">
+        <com:Name xml:lang="en">Public Garden Statistics DSD</com:Name>
+        <str:DataStructureComponents>
+          <str:DimensionList id="DimensionDescriptor" urn="...">
+            <str:Dimension id="GEO" position="1">
+              <str:LocalRepresentation>
+                <str:Enumeration>
+                  <Ref agencyID="TNSO" id="CL_GEO" version="1.0" package="codelist" class="Codelist"/>
+                </str:Enumeration>
+              </str:LocalRepresentation>
+            </str:Dimension>
+            <str:Dimension id="FREQ" position="2">
+              <str:LocalRepresentation>
+                <str:Enumeration>
+                  <Ref agencyID="TNSO" id="CL_FREQ" version="1.0" package="codelist" class="Codelist"/>
+                </str:Enumeration>
+              </str:LocalRepresentation>
+            </str:Dimension>
+            <str:TimeDimension id="TIME_PERIOD" position="3">
+              <str:LocalRepresentation>
+                <str:TextFormat textType="ObservationalTimePeriod"/>
+              </str:LocalRepresentation>
+            </str:TimeDimension>
+          </str:DimensionList>
+        </str:DataStructureComponents>
+      </str:DataStructure>
+    </str:DataStructures>
+  </mes:Structures>
+</mes:Structure>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mes:Structure xmlns:mes="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/message"
+                xmlns:str="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/structure"
+                xmlns:com="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/common">
+  <mes:Structures>
+    <str:Constraints>
+      <str:ContentConstraint id="CR_DF_01DI_IND_AGING" agencyID="TNSO" version="1.0" type="Actual">
+        <str:CubeRegion include="true">
+          <com:KeyValue id="POP_IND">
+            <com:Value>DEM_IND101</com:Value>
+          </com:KeyValue>
+          <com:KeyValue id="FREQ">
+            <com:Value>A3</com:Value>
+          </com:KeyValue>
+          <com:KeyValue id="TIME_PERIOD">
+            <com:Value>2557</com:Value>
+            <com:Value>2567</com:Value>
+          </com:KeyValue>
+        </str:CubeRegion>
+      </str:ContentConstraint>
+    </str:Constraints>
+  </mes:Structures>
+</mes:Structure>

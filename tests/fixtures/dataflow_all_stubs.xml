@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mes:Structure xmlns:mes="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/message"
+                xmlns:str="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/structure"
+                xmlns:com="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/common">
+  <mes:Structures>
+    <str:Dataflows>
+      <str:Dataflow id="DF_03GARD_PUB" agencyID="TNSO" version="1.1" isFinal="true">
+        <com:Name xml:lang="en">Public Garden Statistics</com:Name>
+        <com:Name xml:lang="th">สถิติสวนสาธารณะ</com:Name>
+      </str:Dataflow>
+      <str:Dataflow id="DF_05DIS_298_GRP" agencyID="TNSO" version="1.1" isFinal="true">
+        <com:Name xml:lang="en">Disability Statistics by Group</com:Name>
+      </str:Dataflow>
+    </str:Dataflows>
+  </mes:Structures>
+</mes:Structure>
