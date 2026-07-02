@@ -68,6 +68,31 @@ in `tests/test_sdmx_client.py`).
 | `fetch_data` | Download the actual data as CSV - saves to `downloads/` and returns a preview inline |
 | `get_codelist` | Browse a codelist directly by id |
 
+## Caching (optional, Phase 1)
+
+`list_dataflows`, `get_dataflow_structure`, `get_dimension_codes`, and
+`get_codelist` transparently read through a local SQLite cache if a
+sibling `stathub-cache/` folder is present next to this repo (i.e.
+`../stathub-cache` relative to this project). Metadata like dataflow
+lists, dimensions, and codelists rarely changes, so cached results are
+served directly for 7 days before a fresh TNSO call is made.
+
+This cache is deliberately **not** part of this repo - it holds a
+regenerable SQLite database file (local, machine-specific data), not
+source code, so it lives in its own folder that never needs to be
+committed or published. If that folder doesn't exist (e.g. a fresh clone
+of just this repo from GitHub), caching is silently disabled and every
+tool call goes straight to TNSO, exactly as it did before this feature
+existed - nothing extra to configure.
+
+`get_data_availability` and `fetch_data` are intentionally not cached -
+availability/data changes more often than metadata, and `fetch_data`
+already writes its own CSV output to `downloads/`.
+
+See `cache_integration.py` for the integration point, and the sibling
+`stathub-cache/README.md` (if you have that folder) for how the cache
+itself works.
+
 ## Resources
 
 - `sdmx://info` - endpoint URLs and auth status

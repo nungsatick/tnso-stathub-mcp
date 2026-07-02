@@ -7,6 +7,13 @@ metadata dump. See README.md "Usage Examples" for the intended call order:
 
     list_dataflows -> get_dataflow_structure -> get_dimension_codes
     -> get_data_availability -> build_data_url / fetch_data
+
+Metadata-fetching tools (list_dataflows, get_dataflow_structure,
+get_dimension_codes, get_codelist) go through an optional local cache
+(see cache_integration.py / ../stathub-cache) so repeat lookups skip the
+network + XML parsing round trip. If that cache isn't present, every tool
+falls back to a live TNSO call exactly as before - see the *_cached()
+helpers below.
 """
 
 from __future__ import annotations
@@ -15,9 +22,12 @@ import csv
 import io
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from app_context import AppContext
+from cache_integration import CODELIST_TTL, DATAFLOWS_TTL, STRUCTURE_TTL
 from config import CONFIG
 from models.schemas import (
     CodelistResult,
@@ -43,8 +53,61 @@ from utils import filter_dataflows_by_keywords, validate_dataflow_id, validate_s
 DOWNLOADS_DIR = Path(__file__).resolve().parent.parent / "downloads"
 
 
-def _app_ctx(ctx: Context):
+def _app_ctx(ctx: Context) -> AppContext:
     return ctx.request_context.lifespan_context
+
+
+def _dget(obj: Any, key: str) -> Any:
+    """Read a field from either a sdmx_client.DimensionInfo dataclass
+    instance (live fetch) or a plain dict (cache-store round trip) -
+    cached dimensions come back as dicts, live ones as dataclasses."""
+    return obj[key] if isinstance(obj, dict) else getattr(obj, key)
+
+
+# ----------------------------------------------------------------------
+# Cache-aware fetch helpers, shared by multiple tools below.
+# ----------------------------------------------------------------------
+
+
+async def _get_all_dataflows_cached(app: AppContext) -> list[dict[str, str]]:
+    cache = app.cache
+    if cache is not None and cache.is_fresh("dataflows:all", DATAFLOWS_TTL):
+        cached = cache.get_dataflows()
+        if cached:
+            return cached
+    flows = await app.client.list_dataflows()
+    if cache is not None:
+        cache.save_dataflows(flows)
+    return flows
+
+
+async def _get_structure_cached(app: AppContext, dataflow_id: str, version: str) -> dict[str, Any]:
+    cache = app.cache
+    cache_key = f"structure:{dataflow_id}:{version}"
+    if cache is not None and cache.is_fresh(cache_key, STRUCTURE_TTL):
+        cached = cache.get_dataflow_structure(dataflow_id, version)
+        if cached is not None:
+            return cached
+    structure = await app.client.get_dataflow_structure(dataflow_id, version)
+    if cache is not None:
+        cache.save_dataflow_structure(structure, cache_version=version)
+    return structure
+
+
+async def _get_codelist_cached(
+    app: AppContext, codelist_id: str, agency: str | None, version: str
+) -> dict[str, Any]:
+    cache = app.cache
+    resolved_agency = agency or CONFIG.agency_id
+    cache_key = f"codelist:{codelist_id}:{resolved_agency}:{version}"
+    if cache is not None and cache.is_fresh(cache_key, CODELIST_TTL):
+        cached = cache.get_codelist(codelist_id, resolved_agency, version)
+        if cached is not None:
+            return cached
+    codelist = await app.client.get_codelist(codelist_id, agency, version)
+    if cache is not None:
+        cache.save_codelist(codelist, cache_version=version)
+    return codelist
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -64,9 +127,9 @@ def register_tools(mcp: FastMCP) -> None:
             limit: Max dataflows to return (default 10).
             offset: Pagination offset (default 0).
         """
-        client = _app_ctx(ctx).client
+        app = _app_ctx(ctx)
         try:
-            all_flows = await client.list_dataflows()
+            all_flows = await _get_all_dataflows_cached(app)
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -101,9 +164,9 @@ def register_tools(mcp: FastMCP) -> None:
             dataflow_id: Dataflow id from list_dataflows(), e.g. "DF_03GARD_PUB".
             version: Dataflow version, or "latest" (default).
         """
-        client = _app_ctx(ctx).client
+        app = _app_ctx(ctx)
         try:
-            structure = await client.get_dataflow_structure(dataflow_id, version)
+            structure = await _get_structure_cached(app, dataflow_id, version)
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -115,11 +178,11 @@ def register_tools(mcp: FastMCP) -> None:
             dsd_id=structure["dsd_id"],
             dimensions=[
                 DimensionInfoModel(
-                    id=d.id,
-                    position=d.position,
-                    type=d.type,
-                    codelist_id=d.codelist_id,
-                    codelist_agency=d.codelist_agency,
+                    id=_dget(d, "id"),
+                    position=_dget(d, "position"),
+                    type=_dget(d, "type"),
+                    codelist_id=_dget(d, "codelist_id"),
+                    codelist_agency=_dget(d, "codelist_agency"),
                 )
                 for d in structure["dimensions"]
             ],
@@ -145,21 +208,24 @@ def register_tools(mcp: FastMCP) -> None:
             limit: Max codes to return (default 50).
             version: Dataflow version, or "latest" (default).
         """
-        client = _app_ctx(ctx).client
+        app = _app_ctx(ctx)
         try:
-            structure = await client.get_dataflow_structure(dataflow_id, version)
+            structure = await _get_structure_cached(app, dataflow_id, version)
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
 
-        dim = next((d for d in structure["dimensions"] if d.id == dimension_id), None)
+        dims = structure["dimensions"]
+        dim = next((d for d in dims if _dget(d, "id") == dimension_id), None)
         if dim is None:
-            known = ", ".join(d.id for d in structure["dimensions"])
+            known = ", ".join(_dget(d, "id") for d in dims)
             raise ValueError(f"Dimension '{dimension_id}' not found. Known dimensions: {known}")
-        if dim.codelist_id is None:
+        codelist_id = _dget(dim, "codelist_id")
+        codelist_agency = _dget(dim, "codelist_agency")
+        if codelist_id is None:
             raise ValueError(f"Dimension '{dimension_id}' has no enumerated codelist (likely free text).")
 
         try:
-            codelist = await client.get_codelist(dim.codelist_id, dim.codelist_agency)
+            codelist = await _get_codelist_cached(app, codelist_id, codelist_agency, "latest")
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -171,7 +237,7 @@ def register_tools(mcp: FastMCP) -> None:
         return DimensionCodesResult(
             dataflow_id=dataflow_id,
             dimension_id=dimension_id,
-            codelist_id=dim.codelist_id,
+            codelist_id=codelist_id,
             total_codes=len(codes),
             showing=min(limit, len(codes)),
             search_term=search_term,
@@ -185,10 +251,13 @@ def register_tools(mcp: FastMCP) -> None:
         """
         Check whether data actually exists for a dataflow/key before querying it.
 
+        Not cached (Phase 1 caches metadata only) - data availability can
+        change more often than dataflow/codelist metadata.
+
         Args:
             dataflow_id: Dataflow id, e.g. "DF_03GARD_PUB".
-            key: SDMX key built from build_key-style dot-separated dimension
-                values (e.g. "A..TH.") or "all" to check the whole dataflow.
+            key: SDMX key built from dot-separated dimension values (e.g.
+                "A..TH.") or "all" to check the whole dataflow.
             version: Dataflow version, or "latest" (default).
         """
         client = _app_ctx(ctx).client
@@ -348,9 +417,9 @@ def register_tools(mcp: FastMCP) -> None:
             agency: Owning agency, defaults to TNSO.
             version: Codelist version, or "latest" (default).
         """
-        client = _app_ctx(ctx).client
+        app = _app_ctx(ctx)
         try:
-            codelist = await client.get_codelist(codelist_id, agency, version)
+            codelist = await _get_codelist_cached(app, codelist_id, agency, version)
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
 
