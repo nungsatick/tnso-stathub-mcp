@@ -8,6 +8,10 @@ metadata dump. See README.md "Usage Examples" for the intended call order:
     list_dataflows -> get_dataflow_structure -> get_dimension_codes
     -> get_data_availability -> build_data_url / fetch_data
 
+fetch_data_labeled() is a shortcut that combines fetch_data() with a
+get_dimension_codes()-style lookup for every coded dimension, returning
+CSV with EN/TH label columns already joined in.
+
 Metadata-fetching tools (list_dataflows, get_dataflow_structure,
 get_dimension_codes, get_codelist) go through an optional local cache
 (see cache_integration.py / ../stathub-cache) so repeat lookups skip the
@@ -33,6 +37,8 @@ from models.schemas import (
     CodelistResult,
     CodeItem,
     DataAvailabilityResult,
+    DataDictionaryResult,
+    DataFetchLabeledResult,
     DataFetchResult,
     DataflowListResult,
     DataflowStructureResult,
@@ -296,7 +302,8 @@ def register_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
-    def build_data_url(
+    async def build_data_url(
+        ctx: Context,
         dataflow_id: str,
         key: str = "all",
         format_type: str = "csv",
@@ -305,7 +312,7 @@ def register_tools(mcp: FastMCP) -> None:
         version: str = "latest",
     ) -> DataUrlResult:
         """
-        Build a ready-to-fetch data URL for a dataflow/key (no network call).
+        Build a ready-to-fetch data URL for a dataflow/key.
 
         Args:
             dataflow_id: Dataflow id, e.g. "DF_03GARD_PUB".
@@ -313,15 +320,27 @@ def register_tools(mcp: FastMCP) -> None:
             format_type: "csv", "csvfilewithlabels", "json", or "xml".
             start_period: Optional start period, e.g. "2020" or "2020-Q1".
             end_period: Optional end period.
-            version: Dataflow version, or "latest" (default).
+            version: Dataflow version, or "latest" (default). TNSO's /data
+                endpoint rejects the literal "latest" (unlike /dataflow), so
+                "latest" is resolved to the actual version string (e.g.
+                "1.0") via the cached/live dataflow structure first.
         """
+        app = _app_ctx(ctx)
+        resolved_version = version
+        if version == "latest":
+            try:
+                structure = await _get_structure_cached(app, dataflow_id, "latest")
+            except SdmxClientError as exc:
+                raise ValueError(str(exc)) from exc
+            resolved_version = structure["version"] or version
+
         url = SdmxClient.build_data_url(
             dataflow_id=dataflow_id,
             key=key,
             format_type=format_type,
             start_period=start_period,
             end_period=end_period,
-            version=version,
+            version=resolved_version,
         )
         return DataUrlResult(
             dataflow_id=dataflow_id,
@@ -362,10 +381,19 @@ def register_tools(mcp: FastMCP) -> None:
             max_preview_rows: Max data rows to include inline (default 200).
             save_to_file: Save the full CSV under downloads/ (default True).
         """
-        client = _app_ctx(ctx).client
+        app = _app_ctx(ctx)
+        client = app.client
+        resolved_version = version
+        if version == "latest":
+            try:
+                structure = await _get_structure_cached(app, dataflow_id, "latest")
+            except SdmxClientError as exc:
+                raise ValueError(str(exc)) from exc
+            resolved_version = structure["version"] or version
+
         try:
             csv_text = await client.fetch_data_csv(
-                dataflow_id, key, version, start_period, end_period
+                dataflow_id, key, resolved_version, start_period, end_period
             )
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
@@ -388,11 +416,21 @@ def register_tools(mcp: FastMCP) -> None:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             safe_key = "all" if key == "all" else key.replace("+", "_").replace(".", "-")
             out_path = DOWNLOADS_DIR / f"{dataflow_id}_{safe_key}_{timestamp}.csv"
-            out_path.write_text(csv_text, encoding="utf-8")
+            # utf-8-sig (UTF-8 with BOM) so Excel on Windows detects the
+            # encoding automatically and renders Thai text correctly
+            # instead of mojibake - plain "utf-8" looks fine in a text
+            # editor but Excel defaults to the system codepage without a
+            # BOM. newline="" is required here: csv_text already has \r\n
+            # row terminators (TNSO's CSV), and Path.write_text()/open() in
+            # default text mode additionally translates every embedded \n
+            # to os.linesep on Windows, turning \r\n into \r\r\n and
+            # showing as a blank line after every row in Excel.
+            with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(csv_text)
             file_path = str(out_path.resolve())
 
         source_url = SdmxClient.build_data_url(
-            dataflow_id, key, "csv", start_period, end_period, version
+            dataflow_id, key, "csv", start_period, end_period, resolved_version
         )
 
         return DataFetchResult(
@@ -404,6 +442,275 @@ def register_tools(mcp: FastMCP) -> None:
             file_path=file_path,
             preview_csv=preview_buf.getvalue(),
             source_url=source_url,
+        )
+
+    @mcp.tool()
+    async def fetch_data_labeled(
+        ctx: Context,
+        dataflow_id: str,
+        key: str = "all",
+        version: str = "latest",
+        start_period: str | None = None,
+        end_period: str | None = None,
+        label_mode: str = "both",
+        max_preview_rows: int = 200,
+        save_to_file: bool = True,
+    ) -> DataFetchLabeledResult:
+        """
+        Download dataflow data with human-readable labels joined in for
+        every coded dimension, in one call - no separate
+        get_dimension_codes() + manual merge needed.
+
+        Labels come from the cached codelists (same source as
+        get_dimension_codes()), so repeat calls are fast. Otherwise behaves
+        like fetch_data(): saves the full labeled CSV under downloads/ by
+        default and returns up to max_preview_rows inline.
+
+        Args:
+            dataflow_id: Dataflow id, e.g. "DF_01DI_IND_AGING".
+            key: SDMX key (dot-separated dimension values, or "all"). Use
+                get_data_availability() first to confirm the key has data.
+            version: Dataflow version, or "latest" (default).
+            start_period: Optional start period, e.g. "2020".
+            end_period: Optional end period.
+            label_mode: How to render each coded dimension column -
+                "both" (default): keep the raw code and insert
+                "<DIM>_LABEL_EN"/"<DIM>_LABEL_TH" columns right after it;
+                "th": replace the raw code in place with its Thai label
+                (falls back to the raw code if TNSO has no Thai label for
+                it - the column is never left blank); "en": same but with
+                the English label. "th"/"en" lose the raw code, so the
+                file no longer round-trips into further SDMX key queries.
+            max_preview_rows: Max data rows to include inline (default 200).
+            save_to_file: Save the full labeled CSV under downloads/ (default True).
+        """
+        if label_mode not in ("both", "th", "en"):
+            raise ValueError(f"label_mode must be 'both', 'th', or 'en' - got {label_mode!r}.")
+
+        app = _app_ctx(ctx)
+        client = app.client
+
+        try:
+            structure = await _get_structure_cached(app, dataflow_id, version)
+        except SdmxClientError as exc:
+            raise ValueError(str(exc)) from exc
+        resolved_version = structure["version"] or version
+
+        try:
+            csv_text = await client.fetch_data_csv(
+                dataflow_id, key, resolved_version, start_period, end_period
+            )
+        except SdmxClientError as exc:
+            raise ValueError(str(exc)) from exc
+
+        rows = list(csv.reader(io.StringIO(csv_text)))
+        header, data_rows = (rows[0], rows[1:]) if rows else ([], [])
+
+        # Build a code -> (name, name_th) map for every dimension that has
+        # a codelist AND actually appears as a column in this CSV (some
+        # dimensions may be dropped from the header depending on the key).
+        label_maps: dict[str, dict[str, tuple[str, str]]] = {}
+        labeled_dims: list[str] = []
+        for dim in structure["dimensions"]:
+            dim_id = _dget(dim, "id")
+            codelist_id = _dget(dim, "codelist_id")
+            if not codelist_id or dim_id not in header:
+                continue
+            codelist_agency = _dget(dim, "codelist_agency")
+            try:
+                codelist = await _get_codelist_cached(app, codelist_id, codelist_agency, "latest")
+            except SdmxClientError:
+                continue  # skip labeling this dimension, keep the raw code column
+            label_maps[dim_id] = {
+                c["id"]: (c.get("name", ""), c.get("name_th", "")) for c in codelist["codes"]
+            }
+            labeled_dims.append(dim_id)
+
+        # label_mode="both": keep the raw code column and insert
+        # "<DIM>_LABEL_EN"/"<DIM>_LABEL_TH" right after it.
+        # label_mode="th"/"en": replace the raw code column's value in
+        # place with just that language's label (same column name/count,
+        # no columns added) - falls back to the raw code if unlabeled.
+        new_header: list[str] = []
+        ops: list[tuple[str, int, str | None]] = []  # ("copy"|"replace_en"|"replace_th"|"label_en"|"label_th", src_idx, dim_id)
+        for idx, col in enumerate(header):
+            if col in label_maps and label_mode in ("th", "en"):
+                new_header.append(col)
+                ops.append((f"replace_{label_mode}", idx, col))
+                continue
+            new_header.append(col)
+            ops.append(("copy", idx, None))
+            if col in label_maps and label_mode == "both":
+                new_header.append(f"{col}_LABEL_EN")
+                ops.append(("label_en", idx, col))
+                new_header.append(f"{col}_LABEL_TH")
+                ops.append(("label_th", idx, col))
+
+        def build_row(src: list[str]) -> list[str]:
+            out = []
+            for kind, idx, dim_id in ops:
+                code = src[idx] if idx < len(src) else ""
+                if kind == "copy":
+                    out.append(code)
+                    continue
+                en, th = label_maps[dim_id].get(code, ("", ""))
+                if kind == "label_en":
+                    out.append(en)
+                elif kind == "label_th":
+                    out.append(th)
+                elif kind == "replace_en":
+                    out.append(en or code)
+                elif kind == "replace_th":
+                    out.append(th or code)
+            return out
+
+        labeled_rows = [build_row(r) for r in data_rows]
+        total_rows = len(labeled_rows)
+        preview_rows = labeled_rows[:max_preview_rows]
+        truncated = total_rows > len(preview_rows)
+
+        out_buf = io.StringIO()
+        writer = csv.writer(out_buf)
+        if header:
+            writer.writerow(new_header)
+            writer.writerows(labeled_rows)
+        full_csv_text = out_buf.getvalue()
+
+        preview_buf = io.StringIO()
+        writer = csv.writer(preview_buf)
+        if header:
+            writer.writerow(new_header)
+            writer.writerows(preview_rows)
+
+        file_path = None
+        if save_to_file:
+            DOWNLOADS_DIR.mkdir(exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            safe_key = "all" if key == "all" else key.replace("+", "_").replace(".", "-")
+            suffix = "labeled" if label_mode == "both" else f"labeled_{label_mode}"
+            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{safe_key}_{timestamp}_{suffix}.csv"
+            # BOM + newline="", see fetch_data() note above.
+            with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(full_csv_text)
+            file_path = str(out_path.resolve())
+
+        source_url = SdmxClient.build_data_url(
+            dataflow_id, key, "csv", start_period, end_period, resolved_version
+        )
+
+        return DataFetchLabeledResult(
+            dataflow_id=dataflow_id,
+            key=key,
+            version=resolved_version,
+            label_mode=label_mode,
+            total_rows=total_rows,
+            returned_rows=len(preview_rows),
+            truncated=truncated,
+            labeled_dimensions=labeled_dims,
+            file_path=file_path,
+            preview_csv=preview_buf.getvalue(),
+            source_url=source_url,
+            notes=(
+                "source_url points at the raw (unlabeled) SDMX data endpoint - "
+                "labels were joined in locally from the cached codelists."
+            ),
+        )
+
+    @mcp.tool()
+    async def fetch_data_dictionary(
+        ctx: Context,
+        dataflow_id: str,
+        version: str = "latest",
+        max_preview_rows: int = 200,
+        save_to_file: bool = True,
+    ) -> DataDictionaryResult:
+        """
+        Build a data dictionary (codebook) for a dataflow: every dimension
+        column, and for each coded dimension every value it can take with
+        its English and Thai label. The reference companion to
+        fetch_data()/fetch_data_labeled() - use this to understand what a
+        dataflow's columns and codes mean before (or without) downloading
+        its actual observations.
+
+        One row per (dimension, code). Dimensions with no codelist (e.g.
+        TIME_PERIOD, which is free-form) get a single row noting that
+        instead of a code list. Uses the same cached codelists as
+        get_dimension_codes()/fetch_data_labeled(), so it's fast even for
+        large codelists (e.g. AREA has one row per Thai province/district).
+
+        Args:
+            dataflow_id: Dataflow id, e.g. "DF_01DI_IND_AGING".
+            version: Dataflow version, or "latest" (default).
+            max_preview_rows: Max rows to include inline (default 200).
+            save_to_file: Save the full dictionary CSV under downloads/ (default True).
+        """
+        app = _app_ctx(ctx)
+        try:
+            structure = await _get_structure_cached(app, dataflow_id, version)
+        except SdmxClientError as exc:
+            raise ValueError(str(exc)) from exc
+        resolved_version = structure["version"] or version
+
+        header = ["DIMENSION_ID", "POSITION", "TYPE", "CODELIST_ID", "CODE_ID", "CODE_NAME_EN", "CODE_NAME_TH"]
+        dict_rows: list[list[str]] = []
+        total_codes = 0
+        for dim in structure["dimensions"]:
+            dim_id = _dget(dim, "id")
+            position = _dget(dim, "position")
+            dim_type = _dget(dim, "type")
+            codelist_id = _dget(dim, "codelist_id")
+            codelist_agency = _dget(dim, "codelist_agency")
+            if not codelist_id:
+                dict_rows.append([dim_id, str(position), dim_type, "", "", "(free text / not enumerated)", ""])
+                continue
+            try:
+                codelist = await _get_codelist_cached(app, codelist_id, codelist_agency, "latest")
+            except SdmxClientError as exc:
+                dict_rows.append([dim_id, str(position), dim_type, codelist_id, "", f"(codelist unavailable: {exc})", ""])
+                continue
+            for c in codelist["codes"]:
+                dict_rows.append(
+                    [dim_id, str(position), dim_type, codelist_id, c["id"], c.get("name", ""), c.get("name_th", "")]
+                )
+                total_codes += 1
+
+        total_rows = len(dict_rows)
+        preview_rows = dict_rows[:max_preview_rows]
+        truncated = total_rows > len(preview_rows)
+
+        out_buf = io.StringIO()
+        writer = csv.writer(out_buf)
+        writer.writerow(header)
+        writer.writerows(dict_rows)
+        full_csv_text = out_buf.getvalue()
+
+        preview_buf = io.StringIO()
+        writer = csv.writer(preview_buf)
+        writer.writerow(header)
+        writer.writerows(preview_rows)
+
+        file_path = None
+        if save_to_file:
+            DOWNLOADS_DIR.mkdir(exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{resolved_version}_dictionary_{timestamp}.csv"
+            # BOM + newline="", see fetch_data() note above.
+            with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(full_csv_text)
+            file_path = str(out_path.resolve())
+
+        return DataDictionaryResult(
+            dataflow_id=dataflow_id,
+            version=resolved_version,
+            dataflow_name=structure.get("name", ""),
+            dataflow_name_th=structure.get("name_th", ""),
+            total_dimensions=len(structure["dimensions"]),
+            total_codes=total_codes,
+            total_rows=total_rows,
+            returned_rows=len(preview_rows),
+            truncated=truncated,
+            file_path=file_path,
+            preview_csv=preview_buf.getvalue(),
         )
 
     @mcp.tool()
