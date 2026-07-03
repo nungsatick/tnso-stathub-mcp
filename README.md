@@ -152,7 +152,7 @@ macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
-    "tnso-stathub": {
+    "TNSO-StatHub-MCP": {
       "command": "uv",
       "args": ["run", "--directory", "/path/to/tnso-stathub-mcp", "python", "main_server.py"]
     }
