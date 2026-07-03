@@ -60,7 +60,10 @@ def filter_dataflows_by_keywords(dataflows: list[dict], keywords: list[str]) -> 
 
     scored = []
     for df in dataflows:
-        haystack = f"{df.get('name', '')} {df.get('description', '')} {df.get('id', '')}".lower()
+        haystack = (
+            f"{df.get('name', '')} {df.get('name_th', '')} "
+            f"{df.get('description', '')} {df.get('id', '')}"
+        ).lower()
         score = sum(1 for kw in keywords if kw.lower() in haystack)
         if score > 0:
             scored.append({**df, "relevance_score": score})

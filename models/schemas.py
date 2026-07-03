@@ -16,6 +16,7 @@ class DataflowSummary(BaseModel):
     agency: str
     version: str
     name: str
+    name_th: str = ""
     description: str = ""
 
 
@@ -50,6 +51,7 @@ class DataflowStructureResult(BaseModel):
     agency_id: str
     version: str
     name: str
+    name_th: str = ""
     dsd_id: str | None = None
     dimensions: list[DimensionInfo]
     next_step: str = (
@@ -61,6 +63,7 @@ class DataflowStructureResult(BaseModel):
 class CodeItem(BaseModel):
     id: str
     name: str
+    name_th: str = ""
 
 
 class DimensionCodesResult(BaseModel):
@@ -106,6 +109,7 @@ class CodelistResult(BaseModel):
     agency_id: str
     version: str
     name: str
+    name_th: str = ""
     total_codes: int
     codes: list[CodeItem]
 

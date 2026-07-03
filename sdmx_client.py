@@ -102,13 +102,20 @@ class SdmxClient:
         return resp.text
 
     @staticmethod
-    def _best_name(parent: ET.Element, prefer: tuple[str, ...] = ("en", "th")) -> str:
-        """Pick the best localized com:Name from a structure element."""
+    def _all_names(parent: ET.Element) -> dict[str, str]:
+        """Collect every localized com:Name on a structure element, keyed by
+        xml:lang (e.g. {"en": "...", "th": "..."})."""
         names: dict[str, str] = {}
         for name_el in parent.findall(qname("com", "Name")):
             lang = name_el.get(f"{{http://www.w3.org/XML/1998/namespace}}lang", "")
             if name_el.text:
                 names[lang] = name_el.text
+        return names
+
+    @classmethod
+    def _best_name(cls, parent: ET.Element, prefer: tuple[str, ...] = ("en", "th")) -> str:
+        """Pick the best localized com:Name from a structure element."""
+        names = cls._all_names(parent)
         for lang in prefer:
             if lang in names:
                 return names[lang]
@@ -126,12 +133,14 @@ class SdmxClient:
         )
         results = []
         for df in root.iter(qname("str", "Dataflow")):
+            names = self._all_names(df)
             results.append(
                 {
                     "id": df.get("id", ""),
                     "agency": df.get("agencyID", CONFIG.agency_id),
                     "version": df.get("version", "1.0"),
                     "name": self._best_name(df),
+                    "name_th": names.get("th", ""),
                     "description": "",
                 }
             )
@@ -189,6 +198,7 @@ class SdmxClient:
             "agency_id": CONFIG.agency_id,
             "version": df_el.get("version", version),
             "name": self._best_name(df_el),
+            "name_th": self._all_names(df_el).get("th", ""),
             "dsd_id": dsd_id,
             "dimensions": dimensions,
         }
@@ -208,13 +218,21 @@ class SdmxClient:
 
         codes = []
         for code_el in cl_el.findall(qname("str", "Code")):
-            codes.append({"id": code_el.get("id", ""), "name": self._best_name(code_el)})
+            code_names = self._all_names(code_el)
+            codes.append(
+                {
+                    "id": code_el.get("id", ""),
+                    "name": self._best_name(code_el),
+                    "name_th": code_names.get("th", ""),
+                }
+            )
 
         return {
             "codelist_id": codelist_id,
             "agency_id": agency,
             "version": cl_el.get("version", version),
             "name": self._best_name(cl_el),
+            "name_th": self._all_names(cl_el).get("th", ""),
             "codes": codes,
         }
 

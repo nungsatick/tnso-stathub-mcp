@@ -175,6 +175,7 @@ def register_tools(mcp: FastMCP) -> None:
             agency_id=structure["agency_id"],
             version=structure["version"],
             name=structure["name"],
+            name_th=structure.get("name_th", ""),
             dsd_id=structure["dsd_id"],
             dimensions=[
                 DimensionInfoModel(
@@ -442,6 +443,7 @@ def register_tools(mcp: FastMCP) -> None:
             agency_id=codelist["agency_id"],
             version=codelist["version"],
             name=codelist["name"],
+            name_th=codelist.get("name_th", ""),
             total_codes=len(codelist["codes"]),
             codes=[CodeItem(**c) for c in codelist["codes"]],
         )
