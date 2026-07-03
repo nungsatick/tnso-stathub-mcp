@@ -240,6 +240,19 @@ class SdmxClient:
     # Data availability (best-effort, two strategies)
     # ------------------------------------------------------------------
 
+    async def _resolve_version(self, dataflow_id: str, version: str) -> str:
+        """Resolve version="latest" to a concrete version string (e.g. "1.0").
+
+        TNSO's /dataflow structure endpoint accepts the literal "latest",
+        but its /data and /availableconstraint endpoints reject it outright
+        (HTTP 400 "Invalid version string provided"). Every data-plane
+        method needs a concrete version, so resolve it once here via a
+        structure lookup before building any data-plane flow_ref."""
+        if version != "latest":
+            return version
+        structure = await self.get_dataflow_structure(dataflow_id, "latest")
+        return structure["version"] or version
+
     async def probe_data_availability(
         self, dataflow_id: str, key: str = "all", version: str = "latest"
     ) -> dict[str, Any]:
@@ -252,6 +265,7 @@ class SdmxClient:
         resources), falls back to a `serieskeysonly` data query, which is
         supported by any compliant SDMX 2.1 data endpoint.
         """
+        version = await self._resolve_version(dataflow_id, version)
         flow_ref = f"{CONFIG.agency_id},{dataflow_id},{version}"
 
         try:
@@ -319,6 +333,7 @@ class SdmxClient:
         only check whether data exists), this performs a full data query
         and returns the complete CSV body - can be large for wide keys.
         """
+        version = await self._resolve_version(dataflow_id, version)
         flow_ref = f"{CONFIG.agency_id},{dataflow_id},{version}"
         params: dict[str, Any] = {"format": "csv"}
         if start_period:
