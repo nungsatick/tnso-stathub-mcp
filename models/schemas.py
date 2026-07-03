@@ -131,3 +131,32 @@ class DataFetchResult(BaseModel):
     file_path: str | None = None
     preview_csv: str
     source_url: str
+
+
+class DataDictionaryResult(BaseModel):
+    dataflow_id: str
+    version: str
+    dataflow_name: str = ""
+    dataflow_name_th: str = ""
+    total_dimensions: int
+    total_codes: int
+    total_rows: int
+    returned_rows: int
+    truncated: bool
+    file_path: str | None = None
+    preview_csv: str
+
+
+class DataFetchLabeledResult(BaseModel):
+    dataflow_id: str
+    key: str
+    version: str
+    label_mode: str = "both"
+    total_rows: int
+    returned_rows: int
+    truncated: bool
+    labeled_dimensions: list[str] = Field(default_factory=list)
+    file_path: str | None = None
+    preview_csv: str
+    source_url: str
+    notes: str = ""
