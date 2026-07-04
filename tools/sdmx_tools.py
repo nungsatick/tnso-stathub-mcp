@@ -23,15 +23,16 @@ helpers below.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
-from datetime import datetime, timezone
+import itertools
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
 from app_context import AppContext
-from cache_integration import CODELIST_TTL, DATAFLOWS_TTL, STRUCTURE_TTL
+from cache_integration import CODELIST_TTL, DATA_TTL, DATAFLOWS_TTL, STRUCTURE_TTL
 from config import CONFIG
 from models.schemas import (
     CodelistResult,
@@ -114,6 +115,47 @@ async def _get_codelist_cached(
     if cache is not None:
         cache.save_codelist(codelist, cache_version=version)
     return codelist
+
+
+# ----------------------------------------------------------------------
+# Data cache (Phase 2) helpers - shared by fetch_data(), fetch_data_labeled(),
+# and fetch_data_dictionary(). See the data_cache table comment in
+# stathub-cache/schema.sql for the overall design.
+# ----------------------------------------------------------------------
+
+
+def _data_cache_key(
+    tool: str,
+    dataflow_id: str,
+    version: str,
+    key: str,
+    label_mode: str,
+    start_period: str | None,
+    end_period: str | None,
+) -> str:
+    """Deterministic short hash identifying one (tool, params) combination,
+    used both as the data_cache/cache_meta lookup key and as part of the
+    on-disk filename - so a repeat request with identical parameters reuses
+    (overwrites) the same file instead of accumulating a new timestamped
+    copy every time."""
+    raw = "|".join([tool, dataflow_id, version, key, label_mode, start_period or "", end_period or ""])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _read_cached_preview(file_path: str, max_rows: int) -> str:
+    """Read up to max_rows data rows (plus header) from an existing cached
+    CSV file on disk, without loading the whole file into memory - some
+    cached files are 100+MB."""
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, [])
+        rows = list(itertools.islice(reader, max_rows))
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    if header:
+        writer.writerow(header)
+        writer.writerows(rows)
+    return buf.getvalue()
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -360,6 +402,7 @@ def register_tools(mcp: FastMCP) -> None:
         end_period: str | None = None,
         max_preview_rows: int = 200,
         save_to_file: bool = True,
+        force_refresh: bool = False,
     ) -> DataFetchResult:
         """
         Download the actual observation data for a dataflow (not just metadata).
@@ -371,6 +414,11 @@ def register_tools(mcp: FastMCP) -> None:
         are returned inline in the tool result, to keep responses small; check
         `truncated` / `total_rows` to see whether the preview is everything.
 
+        Repeat calls with identical dataflow_id/key/version/period are served
+        from the local data cache (see DATA_TTL) instead of re-downloading -
+        check `from_cache` in the result. Pass force_refresh=True to bypass
+        the cache and pull fresh data from TNSO regardless of freshness.
+
         Args:
             dataflow_id: Dataflow id, e.g. "DF_01DI_IND_AGING".
             key: SDMX key (dot-separated dimension values, or "all"). Use
@@ -380,9 +428,12 @@ def register_tools(mcp: FastMCP) -> None:
             end_period: Optional end period.
             max_preview_rows: Max data rows to include inline (default 200).
             save_to_file: Save the full CSV under downloads/ (default True).
+            force_refresh: Skip the data cache and re-download from TNSO
+                even if a fresh cached copy exists (default False).
         """
         app = _app_ctx(ctx)
         client = app.client
+        cache = app.cache
         resolved_version = version
         if version == "latest":
             try:
@@ -390,6 +441,25 @@ def register_tools(mcp: FastMCP) -> None:
             except SdmxClientError as exc:
                 raise ValueError(str(exc)) from exc
             resolved_version = structure["version"] or version
+
+        cache_key = _data_cache_key("fetch_data", dataflow_id, resolved_version, key, "", start_period, end_period)
+        source_url = SdmxClient.build_data_url(dataflow_id, key, "csv", start_period, end_period, resolved_version)
+
+        if cache is not None and not force_refresh and cache.is_fresh(f"data:{cache_key}", DATA_TTL):
+            entry = cache.get_data_cache_entry(cache_key)
+            if entry is not None and Path(entry["file_path"]).exists():
+                preview_csv = _read_cached_preview(entry["file_path"], max_preview_rows)
+                return DataFetchResult(
+                    dataflow_id=dataflow_id,
+                    key=key,
+                    total_rows=entry["row_count"],
+                    returned_rows=min(max_preview_rows, entry["row_count"]),
+                    truncated=entry["row_count"] > max_preview_rows,
+                    from_cache=True,
+                    file_path=entry["file_path"] if save_to_file else None,
+                    preview_csv=preview_csv,
+                    source_url=source_url,
+                )
 
         try:
             csv_text = await client.fetch_data_csv(
@@ -410,28 +480,32 @@ def register_tools(mcp: FastMCP) -> None:
             writer.writerow(header)
         writer.writerows(preview_rows)
 
+        # Disk write (and therefore the data cache) only happens when
+        # save_to_file=True - honoring that flag strictly means "don't
+        # touch disk" still does exactly that; it just also means this
+        # particular call can't be served from cache next time.
         file_path = None
         if save_to_file:
             DOWNLOADS_DIR.mkdir(exist_ok=True)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             safe_key = "all" if key == "all" else key.replace("+", "_").replace(".", "-")
-            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{safe_key}_{timestamp}.csv"
+            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{safe_key}_{cache_key}.csv"
             # utf-8-sig (UTF-8 with BOM) so Excel on Windows detects the
             # encoding automatically and renders Thai text correctly
             # instead of mojibake - plain "utf-8" looks fine in a text
             # editor but Excel defaults to the system codepage without a
             # BOM. newline="" is required here: csv_text already has \r\n
-            # row terminators (TNSO's CSV), and Path.write_text()/open() in
-            # default text mode additionally translates every embedded \n
-            # to os.linesep on Windows, turning \r\n into \r\r\n and
-            # showing as a blank line after every row in Excel.
+            # row terminators (TNSO's CSV), and open() in default text
+            # mode additionally translates every embedded \n to
+            # os.linesep on Windows, turning \r\n into \r\r\n and showing
+            # as a blank line after every row in Excel.
             with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
                 f.write(csv_text)
             file_path = str(out_path.resolve())
-
-        source_url = SdmxClient.build_data_url(
-            dataflow_id, key, "csv", start_period, end_period, resolved_version
-        )
+            if cache is not None:
+                cache.save_data_cache_entry(
+                    cache_key, "fetch_data", dataflow_id, resolved_version, key, "",
+                    start_period, end_period, file_path, total_rows, out_path.stat().st_size,
+                )
 
         return DataFetchResult(
             dataflow_id=dataflow_id,
@@ -439,6 +513,7 @@ def register_tools(mcp: FastMCP) -> None:
             total_rows=total_rows,
             returned_rows=len(preview_rows),
             truncated=truncated,
+            from_cache=False,
             file_path=file_path,
             preview_csv=preview_buf.getvalue(),
             source_url=source_url,
@@ -455,6 +530,7 @@ def register_tools(mcp: FastMCP) -> None:
         label_mode: str = "both",
         max_preview_rows: int = 200,
         save_to_file: bool = True,
+        force_refresh: bool = False,
     ) -> DataFetchLabeledResult:
         """
         Download dataflow data with human-readable labels joined in for
@@ -464,7 +540,10 @@ def register_tools(mcp: FastMCP) -> None:
         Labels come from the cached codelists (same source as
         get_dimension_codes()), so repeat calls are fast. Otherwise behaves
         like fetch_data(): saves the full labeled CSV under downloads/ by
-        default and returns up to max_preview_rows inline.
+        default and returns up to max_preview_rows inline. Repeat calls
+        with identical parameters (including label_mode) are served from
+        the local data cache (DATA_TTL) instead of re-downloading/re-joining
+        - check `from_cache`; pass force_refresh=True to bypass it.
 
         Args:
             dataflow_id: Dataflow id, e.g. "DF_01DI_IND_AGING".
@@ -483,18 +562,46 @@ def register_tools(mcp: FastMCP) -> None:
                 file no longer round-trips into further SDMX key queries.
             max_preview_rows: Max data rows to include inline (default 200).
             save_to_file: Save the full labeled CSV under downloads/ (default True).
+            force_refresh: Skip the data cache and re-download/re-join from
+                TNSO even if a fresh cached copy exists (default False).
         """
         if label_mode not in ("both", "th", "en"):
             raise ValueError(f"label_mode must be 'both', 'th', or 'en' - got {label_mode!r}.")
 
         app = _app_ctx(ctx)
         client = app.client
+        cache = app.cache
 
         try:
             structure = await _get_structure_cached(app, dataflow_id, version)
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
         resolved_version = structure["version"] or version
+
+        cache_key = _data_cache_key(
+            "fetch_data_labeled", dataflow_id, resolved_version, key, label_mode, start_period, end_period
+        )
+        source_url = SdmxClient.build_data_url(dataflow_id, key, "csv", start_period, end_period, resolved_version)
+
+        if cache is not None and not force_refresh and cache.is_fresh(f"data:{cache_key}", DATA_TTL):
+            entry = cache.get_data_cache_entry(cache_key)
+            if entry is not None and Path(entry["file_path"]).exists():
+                preview_csv = _read_cached_preview(entry["file_path"], max_preview_rows)
+                return DataFetchLabeledResult(
+                    dataflow_id=dataflow_id,
+                    key=key,
+                    version=resolved_version,
+                    label_mode=label_mode,
+                    total_rows=entry["row_count"],
+                    returned_rows=min(max_preview_rows, entry["row_count"]),
+                    truncated=entry["row_count"] > max_preview_rows,
+                    from_cache=True,
+                    labeled_dimensions=[_dget(d, "id") for d in structure["dimensions"] if _dget(d, "codelist_id")],
+                    file_path=entry["file_path"] if save_to_file else None,
+                    preview_csv=preview_csv,
+                    source_url=source_url,
+                    notes="Served from the local data cache - no TNSO request made.",
+                )
 
         try:
             csv_text = await client.fetch_data_csv(
@@ -585,18 +692,18 @@ def register_tools(mcp: FastMCP) -> None:
         file_path = None
         if save_to_file:
             DOWNLOADS_DIR.mkdir(exist_ok=True)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             safe_key = "all" if key == "all" else key.replace("+", "_").replace(".", "-")
             suffix = "labeled" if label_mode == "both" else f"labeled_{label_mode}"
-            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{safe_key}_{timestamp}_{suffix}.csv"
+            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{safe_key}_{suffix}_{cache_key}.csv"
             # BOM + newline="", see fetch_data() note above.
             with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
                 f.write(full_csv_text)
             file_path = str(out_path.resolve())
-
-        source_url = SdmxClient.build_data_url(
-            dataflow_id, key, "csv", start_period, end_period, resolved_version
-        )
+            if cache is not None:
+                cache.save_data_cache_entry(
+                    cache_key, "fetch_data_labeled", dataflow_id, resolved_version, key, label_mode,
+                    start_period, end_period, file_path, total_rows, out_path.stat().st_size,
+                )
 
         return DataFetchLabeledResult(
             dataflow_id=dataflow_id,
@@ -606,6 +713,7 @@ def register_tools(mcp: FastMCP) -> None:
             total_rows=total_rows,
             returned_rows=len(preview_rows),
             truncated=truncated,
+            from_cache=False,
             labeled_dimensions=labeled_dims,
             file_path=file_path,
             preview_csv=preview_buf.getvalue(),
@@ -623,6 +731,7 @@ def register_tools(mcp: FastMCP) -> None:
         version: str = "latest",
         max_preview_rows: int = 200,
         save_to_file: bool = True,
+        force_refresh: bool = False,
     ) -> DataDictionaryResult:
         """
         Build a data dictionary (codebook) for a dataflow: every dimension
@@ -637,19 +746,51 @@ def register_tools(mcp: FastMCP) -> None:
         instead of a code list. Uses the same cached codelists as
         get_dimension_codes()/fetch_data_labeled(), so it's fast even for
         large codelists (e.g. AREA has one row per Thai province/district).
+        Repeat calls for the same dataflow/version are served from the
+        local data cache (DATA_TTL); pass force_refresh=True to bypass it.
 
         Args:
             dataflow_id: Dataflow id, e.g. "DF_01DI_IND_AGING".
             version: Dataflow version, or "latest" (default).
             max_preview_rows: Max rows to include inline (default 200).
             save_to_file: Save the full dictionary CSV under downloads/ (default True).
+            force_refresh: Skip the data cache and rebuild from the
+                (possibly still-cached) codelists even if a fresh cached
+                dictionary file exists (default False).
         """
         app = _app_ctx(ctx)
+        cache = app.cache
         try:
             structure = await _get_structure_cached(app, dataflow_id, version)
         except SdmxClientError as exc:
             raise ValueError(str(exc)) from exc
         resolved_version = structure["version"] or version
+
+        cache_key = _data_cache_key("fetch_data_dictionary", dataflow_id, resolved_version, "", "", None, None)
+
+        if cache is not None and not force_refresh and cache.is_fresh(f"data:{cache_key}", DATA_TTL):
+            entry = cache.get_data_cache_entry(cache_key)
+            if entry is not None and Path(entry["file_path"]).exists():
+                preview_csv = _read_cached_preview(entry["file_path"], max_preview_rows)
+                # Every dimension contributes exactly one dictionary row
+                # even when it has no codelist (a "free text" row) - so
+                # total_codes is total_rows minus those, without needing
+                # to re-fetch any codelist.
+                free_text_dims = sum(1 for d in structure["dimensions"] if not _dget(d, "codelist_id"))
+                return DataDictionaryResult(
+                    dataflow_id=dataflow_id,
+                    version=resolved_version,
+                    dataflow_name=structure.get("name", ""),
+                    dataflow_name_th=structure.get("name_th", ""),
+                    total_dimensions=len(structure["dimensions"]),
+                    total_codes=max(entry["row_count"] - free_text_dims, 0),
+                    total_rows=entry["row_count"],
+                    returned_rows=min(max_preview_rows, entry["row_count"]),
+                    truncated=entry["row_count"] > max_preview_rows,
+                    from_cache=True,
+                    file_path=entry["file_path"] if save_to_file else None,
+                    preview_csv=preview_csv,
+                )
 
         header = ["DIMENSION_ID", "POSITION", "TYPE", "CODELIST_ID", "CODE_ID", "CODE_NAME_EN", "CODE_NAME_TH"]
         dict_rows: list[list[str]] = []
@@ -692,16 +833,21 @@ def register_tools(mcp: FastMCP) -> None:
         file_path = None
         if save_to_file:
             DOWNLOADS_DIR.mkdir(exist_ok=True)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{resolved_version}_dictionary_{timestamp}.csv"
+            out_path = DOWNLOADS_DIR / f"{dataflow_id}_{resolved_version}_dictionary_{cache_key}.csv"
             # BOM + newline="", see fetch_data() note above.
             with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
                 f.write(full_csv_text)
             file_path = str(out_path.resolve())
+            if cache is not None:
+                cache.save_data_cache_entry(
+                    cache_key, "fetch_data_dictionary", dataflow_id, resolved_version, "", "",
+                    None, None, file_path, total_rows, out_path.stat().st_size,
+                )
 
         return DataDictionaryResult(
             dataflow_id=dataflow_id,
             version=resolved_version,
+            from_cache=False,
             dataflow_name=structure.get("name", ""),
             dataflow_name_th=structure.get("name_th", ""),
             total_dimensions=len(structure["dimensions"]),

@@ -1,6 +1,6 @@
 """
-Optional integration with the local stathub-cache SQLite cache (Phase 1 of
-the caching plan).
+Optional integration with the local stathub-cache SQLite cache (Phase 1:
+metadata; Phase 2: observation-data downloads).
 
 stathub-cache lives as a *sibling* folder next to this repo
 (../stathub-cache relative to this file), deliberately kept outside
@@ -27,11 +27,21 @@ _CACHE_DIR = Path(__file__).resolve().parent.parent / "stathub-cache"
 _DB_PATH = _CACHE_DIR / "tnso_cache.db"
 
 # TTLs (seconds). Dataflow lists/structures/codelists change rarely, so a
-# generous week-long TTL keeps most reads local. get_data_availability and
-# fetch_data are intentionally NOT cached in Phase 1 - see stathub-cache/README.md.
+# generous week-long TTL keeps most reads local.
 DATAFLOWS_TTL = 7 * 24 * 60 * 60
 STRUCTURE_TTL = 7 * 24 * 60 * 60
 CODELIST_TTL = 7 * 24 * 60 * 60
+
+# Phase 2: observation-data downloads (fetch_data(), fetch_data_labeled(),
+# fetch_data_dictionary()) are now also cached, keyed by request params
+# (see _data_cache_key() in tools/sdmx_tools.py). Kept as a separate, much
+# shorter default than the metadata TTLs above since this is the actual
+# statistical data users care about being current - 7 days matches TNSO's
+# real revision cadence (at most monthly) rather than the metadata's
+# "practically never changes" assumption. get_data_availability is a
+# lightweight probe and remains uncached (data-plane freshness matters
+# more there than avoiding a small request).
+DATA_TTL = 7 * 24 * 60 * 60
 
 _store: Any | None = None
 _load_attempted = False

@@ -128,6 +128,7 @@ class DataFetchResult(BaseModel):
     total_rows: int
     returned_rows: int
     truncated: bool
+    from_cache: bool = False
     file_path: str | None = None
     preview_csv: str
     source_url: str
@@ -143,6 +144,7 @@ class DataDictionaryResult(BaseModel):
     total_rows: int
     returned_rows: int
     truncated: bool
+    from_cache: bool = False
     file_path: str | None = None
     preview_csv: str
 
@@ -155,6 +157,7 @@ class DataFetchLabeledResult(BaseModel):
     total_rows: int
     returned_rows: int
     truncated: bool
+    from_cache: bool = False
     labeled_dimensions: list[str] = Field(default_factory=list)
     file_path: str | None = None
     preview_csv: str
