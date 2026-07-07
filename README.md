@@ -46,6 +46,36 @@ of `com:`) when parsing `/availableconstraint/` responses. Fixed, and
 covered by a regression test (`test_probe_data_availability_parses_availableconstraint_success`
 in `tests/test_sdmx_client.py`).
 
+## Architecture
+
+```
+tnso-stathub-mcp/
+├── main_server.py          # MCP server entrypoint (STDIO / HTTP / Inspector)
+├── app_context.py          # App lifespan management & shared context
+├── config.py               # Endpoint configuration (env vars, defaults)
+├── sdmx_client.py          # Async SDMX 2.1 REST client (EN/TH name parsing, version resolution)
+├── cache_integration.py    # Optional sibling SQLite cache hookup (metadata + data)
+├── utils.py                # Validation & keyword-filter helpers
+├── models/
+│   ├── __init__.py
+│   └── schemas.py          # Pydantic output schemas for every tool
+├── tools/
+│   ├── __init__.py
+│   └── sdmx_tools.py       # All MCP tool implementations
+├── resources/
+│   ├── __init__.py
+│   └── sdmx_resources.py   # MCP resources (endpoint info, format/syntax guides)
+├── prompts/
+│   ├── __init__.py
+│   └── sdmx_prompts.py     # Guided discovery/troubleshooting prompts
+├── scripts/
+│   └── smoke_test.py       # Live smoke test against the real TNSO API
+├── tests/                  # Offline unit tests (fixtures-based, no network)
+├── downloads/              # fetch_data* output - CSV cache (gitignored)
+├── Dockerfile              # Container build for HTTP deployment
+└── pyproject.toml          # Project metadata & dependencies (uv)
+```
+
 ## What this server talks to
 
 | Component | URL | Role |
@@ -106,14 +136,33 @@ itself works.
 
 ## Installation
 
-Requires Python 3.12+.
+### Prerequisites
+
+- Python 3.12 or higher
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+
+### Using UV (Recommended)
 
 ```bash
 git clone https://github.com/<your-username>/tnso-stathub-mcp.git
 cd tnso-stathub-mcp
-uv sync                        # recommended
-# or: pip install -r requirements.txt
+uv sync
 ```
+
+### Using pip
+
+```bash
+git clone https://github.com/<your-username>/tnso-stathub-mcp.git
+cd tnso-stathub-mcp
+pip install -r requirements.txt
+```
+
+### Dependencies
+
+- `mcp[cli]>=1.26.0` - Model Context Protocol SDK
+- `pydantic>=2.0.0` - Structured output validation
+- `httpx>=0.27.0` - Async HTTP client
+- `certifi>=2024.0.0` - SSL certificates
 
 ## Running the server
 
