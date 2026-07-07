@@ -162,6 +162,45 @@ macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 Restart Claude Desktop after saving.
 
+### Codex CLI / IDE extension
+
+Codex stores MCP config in `~/.codex/config.toml` (or a project-scoped
+`.codex/config.toml` in trusted projects). Either use the CLI:
+
+```bash
+codex mcp add tnso-stathub --env-cwd /path/to/tnso-stathub-mcp -- uv run python main_server.py
+```
+
+...or edit `config.toml` directly:
+
+```toml
+[mcp_servers.tnso-stathub]
+command = "uv"
+args = ["run", "python", "main_server.py"]
+cwd = "/path/to/tnso-stathub-mcp"
+```
+
+Then restart Codex and run `/mcp` to confirm the server is listed.
+
+**Common mistakes:**
+
+- **`cwd` must be a real, absolute path on the machine Codex runs on** - not
+  a placeholder like `/path/to/tnso-stathub-mcp` left unedited. On Windows
+  this looks like `C:\Users\<you>\...\tnso-stathub-mcp`; under WSL it's the
+  `/mnt/c/Users/<you>/...` form of the same path. If the path doesn't exist,
+  `uv` fails before the MCP handshake even starts and Codex just reports the
+  server as unavailable, with no clearer error.
+- **`uv` not found**: Codex (especially the desktop/GUI app) doesn't always
+  inherit the same `PATH` as your terminal. If `uv run ...` works fine when
+  you run it yourself in PowerShell/bash but Codex still can't find the
+  server, get the full binary path (`where uv` on Windows, `which uv` on
+  macOS/Linux) and use that instead of the bare `uv` in `command`.
+- **Sanity-check outside Codex first**: `cd` into the exact `cwd` you
+  configured and run `uv run python main_server.py` directly. Since this is
+  a STDIO server, it should hang silently waiting on stdin (that's normal,
+  not a hang/crash) - Ctrl+C to exit. Any error printed there is the real
+  problem to fix, before touching Codex's config again.
+
 ### ChatGPT (Plus / Pro / Business / Enterprise)
 
 ChatGPT connects to MCP servers via **Apps & Connectors**, and only over
