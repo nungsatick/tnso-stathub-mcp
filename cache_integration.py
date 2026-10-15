@@ -17,6 +17,7 @@ required for the server to work.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,15 @@ def get_cache() -> Any | None:
     if _load_attempted:
         return _store
     _load_attempted = True
+
+    if os.getenv("SDMX_DISABLE_CACHE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        logger.info("SDMX cache disabled by SDMX_DISABLE_CACHE.")
+        return None
 
     if not _CACHE_DIR.is_dir():
         logger.info("stathub-cache folder not found at %s - caching disabled.", _CACHE_DIR)
